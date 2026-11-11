@@ -39,6 +39,9 @@ jobs:
         with:
           gradle-version: "8.9"
       - uses: android-actions/setup-android@v3
+        with:
+          # v3 defaults to the retired "tools" SDK package.
+          packages: ''
       - name: Install Android SDK platform
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - name: Assemble Android Worker
