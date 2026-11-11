@@ -46,3 +46,10 @@ jobs:
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - name: Assemble Android Worker
         run: gradle --no-daemon -p android-worker :app:assembleDebug
+      - name: Upload Android Worker APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TASH-Android-Worker-debug
+          path: android-worker/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
