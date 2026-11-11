@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+
+# Local application settings
+.distcomp_master.json
+
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+*.iml
+.idea/

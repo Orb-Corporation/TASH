@@ -67,6 +67,10 @@ class TaskManager:
     # ------------------------------------------------------------- job control
 
     def start_job(self, job_id: str, task_type: str, total_items: int, chunk_size: int):
+        if not isinstance(total_items, int) or isinstance(total_items, bool) or total_items <= 0:
+            raise ValueError("total_items must be a positive integer")
+        if not isinstance(chunk_size, int) or isinstance(chunk_size, bool) or chunk_size <= 0:
+            raise ValueError("chunk_size must be a positive integer")
         with self._lock:
             self._cancelled = False
             self.notified_finished = False
@@ -114,8 +118,8 @@ class TaskManager:
     def mark_done(self, chunk_id: int, worker_id: str, result: dict):
         with self._lock:
             c = self._find(chunk_id)
-            if c is None or c.worker_id != worker_id:
-                return  # stale/duplicate completion from a reassigned or timed-out worker
+            if c is None or c.status != ChunkStatus.ASSIGNED or c.worker_id != worker_id:
+                return False  # stale/duplicate completion from a reassigned or timed-out worker
             elapsed = max(1e-6, time.time() - (c.assigned_at or time.time()))
             items = result.get("count", 0)
             rate = items / elapsed
@@ -124,12 +128,13 @@ class TaskManager:
             c.status = ChunkStatus.DONE
             c.result = result
         self._notify()
+        return True
 
     def mark_failed(self, chunk_id: int, worker_id: str, requeue: bool = True):
         with self._lock:
             c = self._find(chunk_id)
-            if c is None:
-                return
+            if c is None or c.status != ChunkStatus.ASSIGNED or c.worker_id != worker_id:
+                return False  # ignore stale failures from old assignments or cancelled jobs
             if requeue and c.attempts < self.MAX_ATTEMPTS:
                 c.status = ChunkStatus.PENDING
             else:
@@ -137,6 +142,7 @@ class TaskManager:
             c.worker_id = None
             c.assigned_at = None
         self._notify()
+        return True
 
     def release_worker_chunks(self, worker_id: str):
         """Requeue any in-flight chunk belonging to a worker that disconnected."""
@@ -168,6 +174,14 @@ class TaskManager:
         c.status = ChunkStatus.PENDING if c.attempts < self.MAX_ATTEMPTS else ChunkStatus.FAILED
         c.worker_id = None
         c.assigned_at = None
+
+    def expected_params(self, chunk_id: int, worker_id: str) -> Optional[dict]:
+        """Return a copy of the assigned chunk parameters only for its current owner."""
+        with self._lock:
+            chunk = self._find(chunk_id)
+            if chunk is None or chunk.status != ChunkStatus.ASSIGNED or chunk.worker_id != worker_id:
+                return None
+            return dict(chunk.params)
 
     def _find(self, chunk_id: int) -> Optional[Chunk]:
         for c in self.chunks:

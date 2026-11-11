@@ -61,6 +61,8 @@ class WorkerClient:
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._is_reconnect = False
         self._pending_pairing_code: Optional[str] = None
+        self._current_task_cancel: Optional[threading.Event] = None
+        self._active_task: Optional[asyncio.Task] = None
 
         # Local, operator-controlled consent gate. No task is ever
         # executed and no data is sent to a Master unless this is True.
@@ -77,22 +79,28 @@ class WorkerClient:
 
     def stop(self):
         self._should_run = False
+        if self._current_task_cancel is not None:
+            self._current_task_cancel.set()
         if self._loop:
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread and self._thread.is_alive() and threading.current_thread() is not self._thread:
             self._thread.join(timeout=2)
 
     def disconnect_gracefully(self):
-        """Send an explicit DISCONNECT before tearing the connection down,
-        so the Master's dashboard updates immediately instead of waiting
-        for a heartbeat timeout."""
+        """Send DISCONNECT before stopping the event loop, when possible."""
         if self._loop and self._writer:
             async def _send():
                 try:
                     await write_message(self._writer, Message(MessageType.DISCONNECT, {}))
                 except Exception:
                     pass
-            asyncio.run_coroutine_threadsafe(_send(), self._loop)
+                finally:
+                    self._writer.close()
+            try:
+                future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
+                future.result(timeout=1.0)
+            except Exception:
+                pass
         self.stop()
 
     def _run_loop(self):
@@ -112,6 +120,11 @@ class WorkerClient:
     def set_paused(self, paused: bool):
         self._paused = paused
         self._emit("paused" if paused else "resumed", {})
+        if self._loop and self._writer and self.state in (
+                WorkerState.CONNECTED, WorkerState.COMPUTING, WorkerState.PAUSED):
+            message_type = MessageType.PAUSE if paused else MessageType.RESUME
+            asyncio.run_coroutine_threadsafe(
+                write_message(self._writer, Message(message_type, {})), self._loop)
 
     def _emit(self, event: str, data: dict):
         if self.on_event:
@@ -144,6 +157,8 @@ class WorkerClient:
             self._emit("reconnecting", {"in_seconds": backoff})
             await asyncio.sleep(backoff)
             backoff = min(RECONNECT_BACKOFF_MAX, backoff * 2)
+        if not self._should_run:
+            asyncio.get_running_loop().call_soon(asyncio.get_running_loop().stop)
 
     async def _register_and_run(self, reader, writer):
         if not self._user_authorized:
@@ -168,9 +183,14 @@ class WorkerClient:
         reply = await read_message(reader)
         if reply is None or reply.type != MessageType.AUTHORIZED:
             reason = reply.payload.get("reason") if reply else "connection closed"
-            self._emit("rejected", {"reason": reason})
-            # Fall back to a full REGISTER next attempt instead of retrying
-            # a reconnect the Master already refused.
+            was_reconnect = msg_type == MessageType.RECONNECT
+            if was_reconnect:
+                self._emit("session_expired", {"reason": reason})
+            else:
+                self._emit("rejected", {"reason": reason})
+                # A rejected first-time registration needs operator action
+                # (for example, a corrected pairing code); do not retry forever.
+                self._should_run = False
             self._is_reconnect = False
             self.token = None
             writer.close()
@@ -190,6 +210,15 @@ class WorkerClient:
                 await self._dispatch(msg, writer)
         finally:
             hb_task.cancel()
+            if self._current_task_cancel is not None:
+                self._current_task_cancel.set()
+            if self._active_task is not None and not self._active_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(self._active_task), timeout=2)
+                except asyncio.TimeoutError:
+                    self._active_task.cancel()
+                except Exception:
+                    pass
 
     async def _heartbeat_loop(self, writer):
         while True:
@@ -203,17 +232,37 @@ class WorkerClient:
 
     async def _dispatch(self, msg: Message, writer):
         if msg.type == MessageType.TASK_ASSIGN:
-            await self._handle_task_assign(msg, writer)
+            if self._active_task is not None and not self._active_task.done():
+                # The Master can answer a just-sent TASK_COMPLETE before this
+                # coroutine has returned. Allow that tiny completion window,
+                # but never overlap two independent task handlers.
+                try:
+                    await asyncio.wait_for(asyncio.shield(self._active_task), timeout=1.0)
+                except asyncio.TimeoutError:
+                    await write_message(writer, Message(MessageType.TASK_FAILED, {
+                        "chunk_id": msg.payload.get("chunk_id"),
+                        "error": "worker is already processing a task",
+                    }))
+                    return
+            self._active_task = asyncio.create_task(self._handle_task_assign(msg, writer))
         elif msg.type == MessageType.TASK_CANCEL:
+            if self._current_task_cancel is not None:
+                self._current_task_cancel.set()
             self._emit("task_cancelled", {})
         elif msg.type == MessageType.PAUSE:
-            self.set_paused(True)
+            self._paused = True
+            self._emit("paused", {})
         elif msg.type == MessageType.RESUME:
-            self.set_paused(False)
+            self._paused = False
+            self._emit("resumed", {})
         elif msg.type == MessageType.HEARTBEAT_ACK:
             pass
         elif msg.type == MessageType.DISCONNECT:
+            self._should_run = False
+            if self._current_task_cancel is not None:
+                self._current_task_cancel.set()
             writer.close()
+            self._emit("remote_disconnect", {})
 
     async def _handle_task_assign(self, msg: Message, writer):
         chunk_id = msg.payload["chunk_id"]
@@ -236,6 +285,9 @@ class WorkerClient:
             idle_fraction = (100 - self.cpu_limit_percent) / 100.0
             params["cpu_limit_sleep"] = 0.01 * idle_fraction * 10
 
+        cancel_event = threading.Event()
+        self._current_task_cancel = cancel_event
+        params["_cancel_event"] = cancel_event
         self.state = WorkerState.COMPUTING
         self._emit("task_started", {"chunk_id": chunk_id})
         loop = asyncio.get_event_loop()
@@ -249,6 +301,8 @@ class WorkerClient:
                                 {"chunk_id": chunk_id, "error": str(exc)}))
             self._emit("task_failed", {"chunk_id": chunk_id, "error": str(exc)})
         finally:
+            if self._current_task_cancel is cancel_event:
+                self._current_task_cancel = None
             self.state = WorkerState.CONNECTED
 
     def send_discovery_probe(self, timeout=1.5):

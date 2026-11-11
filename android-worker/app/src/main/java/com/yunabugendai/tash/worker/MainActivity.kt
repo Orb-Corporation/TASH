@@ -28,10 +28,9 @@ class MainActivity : Activity() {
         fun field(hint: String, value: String = "") = EditText(this).apply { this.hint = hint; setText(value) }
         host = field("Master IP"); port = field("Master port", "8765"); code = field("Pairing code"); name = field("Worker name", "Android-${Build.MODEL}")
         findMaster = Button(this).apply { text = "Find Master on LAN" }; status = TextView(this).apply { text = "Disconnected"; textSize = 16f; setPadding(0,24,0,24) }
-        connect = Button(this).apply { text = "Connect" }; val masterMode = Button(this).apply { text = "Start as Master" }
-        box.addView(TextView(this).apply { text = "TASH Android Worker"; textSize = 24f }); box.addView(host); box.addView(port); box.addView(code); box.addView(name); box.addView(findMaster); box.addView(status); box.addView(connect); box.addView(masterMode); setContentView(box)
+        connect = Button(this).apply { text = "Connect" }
+        box.addView(TextView(this).apply { text = "TASH Android Worker"; textSize = 24f }); box.addView(host); box.addView(port); box.addView(code); box.addView(name); box.addView(findMaster); box.addView(status); box.addView(connect); setContentView(box)
         findMaster.setOnClickListener { discoverMasters() }
-        masterMode.setOnClickListener { startActivity(android.content.Intent(this, MasterActivity::class.java)) }
         connect.setOnClickListener {
             if (client?.isConnected() == true) { client?.disconnect(); return@setOnClickListener }
             AlertDialog.Builder(this).setTitle("Authorize Master").setMessage("Allow this Android device to connect to ${host.text}:${port.text} and perform authorized TASH computations?").setNegativeButton("Cancel", null).setPositiveButton("Authorize") { _, _ -> startWorker() }.show()
@@ -45,14 +44,14 @@ class MainActivity : Activity() {
             try {
                 DatagramSocket().use { socket ->
                     socket.broadcast = true; socket.soTimeout = 1200
-                    val request = JSONObject().put("magic", "TASH_DISCOVERY_V1").toString().toByteArray(Charsets.UTF_8)
+                    val request = JSONObject().put("magic", "DISTCOMP_DISCOVER_V1").toString().toByteArray(Charsets.UTF_8)
                     socket.send(DatagramPacket(request, request.size, InetAddress.getByName("255.255.255.255"), 8766))
                     val end = System.currentTimeMillis() + 1500
                     while (System.currentTimeMillis() < end) {
                         try {
                             val buf = ByteArray(4096); val reply = DatagramPacket(buf, buf.size); socket.receive(reply)
                             val msg = JSONObject(String(reply.data, reply.offset, reply.length, Charsets.UTF_8))
-                            if (msg.optString("magic") == "TASH_MASTER_V1") {
+                            if (msg.optString("magic") == "DISTCOMP_MASTER_V1") {
                                 val h = msg.optString("host", reply.address.hostAddress); val p = msg.optInt("port", 8765); val entry = "${msg.optString("name", "Master")} — $h:$p"
                                 if (!found.contains(entry)) found.add(entry)
                             }

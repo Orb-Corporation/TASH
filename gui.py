@@ -200,8 +200,34 @@ class MasterApp:
             f"and pairing code {self.pairing_code}. Workers on the same local network can "
             f"also find this Master automatically via the 'Find Master on LAN' button.")
 
+    def _read_job_values(self):
+        try:
+            n = int(self.var_n.get())
+            chunk = int(self.var_chunk.get())
+        except (tk.TclError, TypeError, ValueError):
+            messagebox.showerror("Invalid workload", "Enter whole numbers for N and chunk size.",
+                                 parent=self.root)
+            return None
+        if n <= 0 or chunk <= 0:
+            messagebox.showerror("Invalid workload", "N and chunk size must both be positive.",
+                                 parent=self.root)
+            return None
+        if self.task_manager.progress_snapshot()["total"] and not self.task_manager.is_job_finished():
+            messagebox.showwarning("Job already running",
+                                   "Stop or finish the current distributed job before starting another.",
+                                   parent=self.root)
+            return None
+        return n, chunk
+
     def _run_master_only(self):
-        n = self.var_n.get()
+        try:
+            n = int(self.var_n.get())
+            if n <= 0:
+                raise ValueError
+        except (tk.TclError, TypeError, ValueError):
+            messagebox.showerror("Invalid workload", "N must be a positive whole number.",
+                                 parent=self.root)
+            return
         self._log(f"Running master-only benchmark for N={n}...")
         threading.Thread(target=self._master_only_thread, args=(n,), daemon=True).start()
 
@@ -214,8 +240,15 @@ class MasterApp:
         self.events.put(("master_only_done", {"n": n, "elapsed": elapsed, "sum": result["sum"]}))
 
     def _run_distributed(self):
-        n = self.var_n.get()
-        chunk = self.var_chunk.get()
+        values = self._read_job_values()
+        if values is None:
+            return
+        n, chunk = values
+        if not any(conn.status == "authorized" for conn in self.server.workers.values()):
+            messagebox.showwarning("No authorized Workers",
+                                   "Connect and authorize at least one Worker first.",
+                                   parent=self.root)
+            return
         self.job_id_counter += 1
         job_id = f"job-{self.job_id_counter}"
         self.task_manager.start_job(job_id, "cpu_benchmark", n, chunk)
@@ -227,8 +260,10 @@ class MasterApp:
         self._log("Stop requested: cancelling all pending and in-flight chunks.")
 
     def _run_benchmark_suite(self):
-        n = self.var_n.get()
-        chunk = self.var_chunk.get()
+        values = self._read_job_values()
+        if values is None:
+            return
+        n, chunk = values
         self._log("Running comparison benchmark (this can take a while)...")
         threading.Thread(target=self._benchmark_thread, args=(n, chunk), daemon=True).start()
 
@@ -260,8 +295,15 @@ class MasterApp:
                     "chunk_assigned", "task_ack", "progress"):
             pass  # picked up by the periodic _refresh_progress() call
         elif ev == "job_finished":
-            self._log("Job finished.")
-            messagebox.showinfo("Job finished", "All chunks completed, failed, or were cancelled.")
+            result = self.task_manager.combine_results()
+            snap = self.task_manager.progress_snapshot()
+            self._log(f"Job finished: {snap['done']} completed, {snap['failed']} failed, "
+                      f"{snap['cancelled']} cancelled; {result['count']} items, "
+                      f"sum={result['sum']:.6f}.")
+            messagebox.showinfo("Job finished",
+                                f"Completed chunks: {snap['done']}\nFailed: {snap['failed']}\n"
+                                f"Cancelled: {snap['cancelled']}\nItems computed: {result['count']}\n"
+                                f"Sum: {result['sum']:.6f}")
         elif ev == "master_only_done":
             self._log(f"Master-only done: {data['n']} items in {data['elapsed']:.2f}s "
                       f"({data['n']/data['elapsed']:.0f} items/s), sum={data['sum']:.4f}")

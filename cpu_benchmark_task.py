@@ -50,8 +50,11 @@ def cpu_benchmark(params: dict) -> dict:
     t0 = time.perf_counter()
     total = 0.0
     count = 0
-    yield_every = 2000  # how often to honor the CPU throttle, if any
+    yield_every = 2000  # throttle and cancellation checks
+    cancel_event = params.get("_cancel_event")
     for x in range(start, end):
+        if count % yield_every == 0 and cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError("computation cancelled by Worker operator or Master")
         total += f(x)
         count += 1
         if cpu_limit_sleep > 0 and count % yield_every == 0:

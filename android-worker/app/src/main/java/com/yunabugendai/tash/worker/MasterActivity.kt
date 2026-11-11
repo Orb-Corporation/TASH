@@ -38,7 +38,7 @@ class MasterActivity : Activity() {
 }
 
 private class AndroidMaster {
-    companion object { const val TCP_PORT = 8765; const val DISCOVERY_PORT = 8766; const val MAGIC = "TASH_DISCOVERY_V1"; const val REPLY = "TASH_MASTER_V1" }
+    companion object { const val TCP_PORT = 8765; const val DISCOVERY_PORT = 8766; const val MAGIC = "DISTCOMP_DISCOVER_V1"; const val REPLY = "DISTCOMP_MASTER_V1" }
     data class Worker(val id: String, val name: String, val socket: Socket, val out: java.io.BufferedWriter)
     private val executor = Executors.newCachedThreadPool()
     private val workers = ConcurrentHashMap<String, Worker>()

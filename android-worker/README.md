@@ -1,31 +1,26 @@
 # TASH Android Worker
 
-Native Android Worker for TASH protocol v1.0. It connects to an existing TASH Master over TCP, performs explicit pairing, sends heartbeats/status, accepts only the built-in `cpu_benchmark` task, verifies work using the same deterministic digest algorithm as the Python Worker, and reconnects using the issued session token.
+A native Kotlin Worker for TASH protocol v1.0. It connects to the Python desktop Master over TCP, performs pairing, sends heartbeats/status updates, accepts only the built-in `cpu_benchmark` task, and reconnects using the session token issued by the Master.
 
 ## Build
 
-Open `android-worker/` in Android Studio and build the `app` module, or run:
-
-```bash
-./gradlew :app:assembleDebug
-```
-
-Install the resulting debug APK on an Android device on the same LAN as the Master.
+Open `android-worker/` in Android Studio as an existing Gradle project. After Gradle sync, select **Build → Build APK(s)**. The generated debug APK is under `app/build/outputs/apk/debug/`.
 
 ## Connect
 
-1. Start the normal TASH Master on Windows/Linux.
-2. Read its pairing code and local IP address.
+1. Start the Python TASH Master on Windows or Linux.
+2. Read its current pairing code and local IPv4 address.
 3. Open TASH Android Worker.
-4. Enter the Master IP, port `8765`, pairing code, and a worker name.
-5. Press **Connect** and explicitly authorize the Master in the Android confirmation dialog.
+4. Enter the Master IP, port `8765`, pairing code, and a Worker name.
+5. Press **Connect** and approve the local Android confirmation dialog.
 6. Approve the Worker on the Master dashboard.
 
-The Android Worker does not expose a shell, execute arbitrary received code, or grant access to the device. It only implements the TASH protocol and the built-in CPU benchmark task.
+The Android Worker uses the same UDP discovery identifiers as the Python Master. If the network blocks broadcast discovery, enter the Master IP manually.
 
 ## Current limitations
 
-- LAN discovery is not yet implemented in the Android UI; enter the Master IP manually.
-- GPU utilization is reported as unavailable rather than guessed.
-- Android CPU utilization is not reported because a portable per-process CPU percentage is not available from the same simple API used by the desktop Worker.
-- The current Android Worker is intended for foreground use; it does not claim a background service/keep-alive exemption.
+- The Android app is a Worker, not a supported Master.
+- GPU and per-process CPU utilization are reported as unavailable.
+- The app is foreground-only. Android may suspend or stop work when the app is backgrounded or the device enters power-saving modes.
+- Only the built-in CPU benchmark task is supported.
+- The Android app has not been validated across a broad range of Android devices; treat it as experimental until tested on your hardware.

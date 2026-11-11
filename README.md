@@ -1,188 +1,142 @@
-# Distributed Compute (Master / Worker)
+# TASH — LAN Task Sharing
 
-A consent-based local distributed computing app for devices you own or
-have explicitly authorized. One **Master** splits a workload into
-independent chunks and hands them to one or more **Worker** apps on the
-same local network; Workers only ever run a small set of predefined,
-built-in computations -- never arbitrary code sent over the network.
+TASH is a small, consent-based distributed-computing prototype for devices on the same local network. A **Master** divides a supported workload into chunks; authorized **Workers** compute those chunks and return results over TCP.
 
-Built-in workload: a CPU benchmark, `f(x)` for `x = 1..N`, split into
-chunks and distributed. See `docs/PROTOCOL.md` for the wire protocol and
-`docs/TROUBLESHOOTING.md` if something doesn't connect.
+> **Scope of this build:** the shipped workload is a deterministic CPU benchmark. TASH is not yet a general-purpose compute scheduler, a GPU renderer, or a Minecraft shader/render farm. It does not transmit or execute arbitrary code.
 
-## What this is (and isn't)
+## Current status
 
-- Every Worker must be started by hand on a machine you control, and its
-  operator must explicitly authorize the Master before anything runs.
-- The Master requires a pairing code (shown on its own screen) plus a
-  manual "Authorize this Worker?" click before a Worker joins.
-- A Worker only ever executes functions already registered in
-  `tasks/base_task.py` -- there is no code path that evals, execs, or
-  shells out based on data received from the network.
-- This is LAN tooling, not a hardened, internet-facing service. Don't
-  expose the Master's ports to the public internet.
-- **Android:** true Android support isn't practical with this project's
-  stack (Tkinter has no Android runtime). Building a native Android
-  Worker would require a separate app (e.g. Kotlin, or a Python-on-Android
-  toolchain like Kivy/Chaquopy) and was out of scope here -- documented
-  rather than faked. The protocol in `docs/PROTOCOL.md` is designed so a
-  native Android Worker could speak it without touching the Master or
-  the Windows/Linux Worker at all.
+- Desktop Master: Python + Tkinter, intended for Windows and Linux.
+- Desktop Worker: Python + Tkinter, intended for Windows and Linux.
+- Android Worker: native Kotlin source in `android-worker/`; build it with Android Studio.
+- Built-in task: `cpu_benchmark` only.
+- Tests: unit tests plus a real TCP localhost smoke test.
+- No prebuilt Windows installer or signed Android APK is published yet.
+
+The source is suitable for hands-on testing, but it still needs validation across multiple physical devices and different routers/firewall configurations before being called a stable release.
+
+## Features
+
+- Master and Worker applications communicate over a local TCP connection.
+- UDP broadcast discovery can locate a Master on the same IPv4 LAN.
+- First-time pairing requires the Master's numeric pairing code and approval on the Master device.
+- Workers require a separate local confirmation before connecting.
+- Previously approved Workers can reconnect during the same Master session with a session token.
+- Chunk assignment, timeout/reassignment, progress, per-worker statistics, pause, cancellation, and benchmark comparison are implemented.
+- Workers execute only task types registered in their own local task registry. A Master cannot send Python, shell commands, binaries, or scripts for a Worker to execute.
+- The Android Worker speaks the same protocol and can connect to the Python desktop Master.
 
 ## Requirements
 
-- Python 3.9+
-- Tkinter (usually bundled with Python; see Troubleshooting if it's missing)
-- Windows or Linux, for both Master and Worker
+- Python 3.9 or newer.
+- Tkinter (included with most standard Python distributions; on some Linux distributions install the system Tk package).
+- `psutil` for CPU and memory reporting; the app degrades gracefully if it is unavailable.
 
-## Installation
-
-```bash
-git clone <this-repo-url> distributed-compute
-cd distributed-compute
-python3 -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-Optional, for NVIDIA GPU stats in the dashboard:
+Install dependencies from the repository root:
 
 ```bash
-pip install GPUtil
+python -m venv .venv
+# Windows:
+.venv\\Scripts\\activate
+# Linux:
+source .venv/bin/activate
+
+python -m pip install -r requirements.txt
 ```
 
-## Running the Master
+Optional NVIDIA GPU telemetry:
+
+```bash
+python -m pip install GPUtil
+```
+
+## Run the desktop applications
+
+Start the Master on one computer:
 
 ```bash
 python -m master.master_app
-# or: scripts/run_master.sh   (Linux/macOS)
-# or: scripts\run_master.bat  (Windows)
 ```
 
-On launch, the Master:
-1. Starts listening for Workers on TCP port `8765` and LAN discovery on
-   UDP port `8766` (both configurable via `~/.distcomp_master.json` after
-   the first run).
-2. Generates and displays a **pairing code** at the top of the Dashboard
-   tab -- give this to whoever is starting a Worker.
-
-To run a job:
-1. Go to the **Job** tab, set workload size `N` and chunk size.
-2. Click **Run on Master only** for a local baseline, or **Distribute to
-   Workers** once at least one Worker shows "authorized" on the Dashboard.
-3. Watch overall and per-worker progress; **Stop all computation** cancels
-   everything in flight.
-4. Use the **Benchmark** tab to compare Master-only vs +1 Worker vs +all
-   Workers on the same workload, including a warning if distributing
-   turned out slower than running locally.
-
-## Running a Worker
+Start a Worker on each additional computer:
 
 ```bash
 python -m worker.worker_app
-# or: scripts/run_worker.sh   (Linux/macOS)
-# or: scripts\run_worker.bat  (Windows)
 ```
 
-1. Enter the Master's IP and port (or click **Find Master on LAN**).
-2. Enter the pairing code the Master operator gave you.
-3. Click **Connect** -- a popup will ask you to explicitly authorize this
-   Master. Nothing runs until you click yes.
-4. Optionally lower the **CPU usage limit** slider before work arrives.
-5. **Pause** or **Disconnect** at any time; the Worker automatically
-   reconnects (with backoff) after a temporary network drop, without
-   needing you to re-authorize.
+On the Master dashboard, note the displayed pairing code. In each Worker app, enter the Master's LAN IP address, TCP port (default `8765`), and pairing code. The Worker operator must confirm the local authorization prompt, then the Master operator must approve the Worker.
 
-## Running the tests
+Workers on the same IPv4 network can use **Find Master on LAN** instead of entering the IP manually. Discovery uses UDP port `8766`.
+
+The shell launchers are also available from the repository root:
 
 ```bash
-pip install -r requirements-dev.txt
-pytest
+bash run_master.sh
+bash run_worker.sh
 ```
 
-Tests cover the wire protocol, pairing/token auth, chunk splitting and
-reassignment (including timeouts, disconnects, and cancellation), the
-CPU benchmark task's determinism and result-verification digest, the
-task registry's refusal to run unregistered task types, and the
-never-raises contract of the hardware-info helpers.
+## Run a job
 
-There's also `e2e_check.py` at the repo root -- a manual, non-pytest
-smoke test that spins up a real Master and a real Worker over actual
-TCP sockets on localhost, distributes a real job, and checks the
-distributed result exactly matches a single-device computation:
+1. Start and authorize at least one Worker.
+2. Open the Master's **Job** tab.
+3. Set a positive workload size `N` and chunk size.
+4. Choose **Run on Master only** for a local baseline or **Distribute to Workers** for a distributed run.
+5. Monitor progress and use **Stop all computation** to cancel pending and in-flight chunks.
+
+The **Benchmark** tab compares a local run with runs using one or all authorized Workers. Distribution is not guaranteed to be faster: network overhead and slower devices can make small jobs slower.
+
+## Android Worker
+
+Open the `android-worker/` directory as a Gradle project in Android Studio, allow Gradle sync to finish, then use **Build → Build APK(s)**. Install the generated debug APK on an Android device on the same LAN as the Master.
+
+The Android app currently ships as a **Worker**. Enter the Master address, port, pairing code, and a Worker name; tap **Connect** and approve the local confirmation. LAN discovery uses the same protocol markers as the desktop Master. The Android app is foreground-only; it does not claim to keep computing after Android suspends or closes it.
+
+## Tests
+
+Install development requirements and run the unit suite:
 
 ```bash
-python3 e2e_check.py
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
 ```
 
-## Adding a new distributable task
+Run the socket-level smoke test:
 
-1. Write a function `def my_task(params: dict) -> dict` in a new module
-   under `tasks/`.
-2. Decorate it with `@register_task("my_task_name")`.
-3. Import that module once from `worker/worker_core.py` (next to the
-   existing `import tasks.cpu_benchmark_task`) so the decorator runs.
-4. Have the Master's job-creation code build chunks with
-   `task_type="my_task_name"` and whatever `params` your function needs.
-
-Nothing about `shared/protocol.py`, `master/master_core.py`, or
-`worker/worker_core.py` needs to change -- the networking layer is
-generic over task type.
-
-## Project layout
-
-```
-distributed-compute/
-├── README.md
-├── requirements.txt
-├── requirements-dev.txt
-├── pytest.ini
-├── .gitignore
-├── docs/
-│   ├── PROTOCOL.md            # full wire-protocol reference + sequence diagrams
-│   └── TROUBLESHOOTING.md
-├── scripts/
-│   ├── run_master.sh / .bat
-│   └── run_worker.sh / .bat
-├── shared/                    # code used by both Master and Worker
-│   ├── constants.py           # ports, timeouts, protocol version
-│   ├── protocol.py            # message format + framing
-│   ├── crypto.py              # pairing code + session token helpers
-│   └── system_info.py         # best-effort CPU/RAM/GPU snapshot
-├── tasks/                     # the generic task registry + built-in tasks
-│   ├── base_task.py           # TASK_REGISTRY; the only way anything executes
-│   └── cpu_benchmark_task.py  # f(x) for x in [start, end), plus verification digest
-├── master/
-│   ├── config.py              # persisted settings (~/.distcomp_master.json)
-│   ├── task_manager.py        # chunk splitting, assignment, timeouts, reassignment
-│   ├── master_core.py         # asyncio TCP server + UDP discovery + auth handshake
-│   ├── benchmark.py           # Master-only vs +1 Worker vs +N Workers comparison
-│   ├── gui.py                 # Tkinter dashboard / job / benchmark / logs / settings tabs
-│   └── master_app.py          # entry point: `python -m master.master_app`
-├── worker/
-│   ├── worker_core.py         # asyncio client: connect, auth, heartbeat, execute, reconnect
-│   ├── gui.py                 # Tkinter connection/status/controls/logs UI
-│   └── worker_app.py          # entry point: `python -m worker.worker_app`
-└── tests/
-    ├── test_protocol.py
-    ├── test_crypto.py
-    ├── test_cpu_benchmark_task.py
-    ├── test_task_manager.py
-    ├── test_task_registry.py
-    └── test_system_info.py
+```bash
+python e2e_check.py
 ```
 
-## Security summary
+The smoke test starts a real Master and Worker on localhost, authorizes them through a test-only auto-approval switch, distributes a job, and compares the result with a direct computation. It does not replace testing on separate physical devices.
 
-- Explicit pairing (numeric code) + explicit operator approval before any
-  Worker is trusted.
-- Per-worker session tokens for silent reconnect after network blips,
-  without weakening the initial explicit-approval requirement (a token
-  that doesn't match a previously-approved `worker_id` is rejected).
-- Protocol version is checked on every registration; mismatches are
-  rejected rather than guessed at.
-- Task execution is table-driven (`TASK_REGISTRY`) -- an unrecognized
-  `task_type` is refused, and there is no eval/exec/shell path anywhere
-  from network input to code execution.
-- Workers never receive or run shell commands, binaries, or scripts from
-  the Master -- only `task_type` + a small JSON `params` dict.
+## Project structure
+
+The core implementation files remain at the repository root. Small package modules under `master/`, `worker/`, `shared/`, and `tasks/` provide stable import paths used by the app launchers and tests.
+
+```text
+TASH/
+├── master/                 # Master package entry points and import adapters
+├── worker/                 # Worker package, import adapter, and Tkinter GUI
+├── shared/                 # shared protocol, constants, crypto, telemetry adapters
+├── tasks/                  # local task registry and built-in task adapters
+├── android-worker/         # native Android Worker
+├── protocol.py             # newline-delimited JSON protocol
+├── master_core.py          # Master networking and authorization
+├── worker_core.py          # Worker networking and task execution
+├── task_manager.py         # chunk scheduling and result aggregation
+├── gui.py                  # Master GUI
+├── cpu_benchmark_task.py   # built-in deterministic CPU workload
+├── test_*.py               # unit tests
+├── e2e_check.py            # localhost integration smoke test
+├── PROTOCOL.md
+└── TROUBLESHOOTING.md
+```
+
+## Network and security notes
+
+- TASH is designed for a trusted local network, not for exposure to the public internet. Do not forward TCP `8765` or UDP `8766` from your router.
+- Pairing and approval prevent accidental or casual unauthorized joins; this prototype does not provide TLS transport encryption or protection against a malicious peer already on the LAN.
+- Session tokens are held in memory by the Master. Restarting the Master invalidates existing Worker sessions; pair those Workers again.
+- A task name and JSON parameters are sent over the network. A Worker only runs the matching function already present in its local `TASK_REGISTRY`.
+- Result digests are a low-cost consistency check, not cryptographic proof that a remote machine performed every operation honestly.
+
+See [PROTOCOL.md](PROTOCOL.md) for message details and [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common setup issues.

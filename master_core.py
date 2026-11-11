@@ -14,6 +14,7 @@ ever touches a Tkinter widget directly.
 import asyncio
 import json
 import logging
+import math
 import socket
 import threading
 import time
@@ -116,6 +117,7 @@ class MasterServer:
         addr = writer.get_extra_info("peername")
         addr_str = f"{addr[0]}:{addr[1]}" if addr else "unknown"
         worker_id = None
+        conn = None
         try:
             msg = await read_message(reader)
             if msg is None or msg.type not in (MessageType.REGISTER, MessageType.RECONNECT):
@@ -148,21 +150,24 @@ class MasterServer:
                                         {"reason": "unrecognized reconnect credentials; "
                                                     "please register again"}))
                     writer.close()
-                    del self.workers[worker_id]
+                    if self.workers.get(worker_id) is conn:
+                        del self.workers[worker_id]
                     return
             else:
                 if payload.get("pairing_code") != self.pairing_code:
                     await write_message(writer, Message(MessageType.REJECTED,
                                         {"reason": "invalid pairing code"}))
                     writer.close()
-                    del self.workers[worker_id]
+                    if self.workers.get(worker_id) is conn:
+                        del self.workers[worker_id]
                     return
                 approved = await self._await_approval(conn)
                 if not approved:
                     await write_message(writer, Message(MessageType.REJECTED,
                                         {"reason": "rejected by master operator"}))
                     writer.close()
-                    del self.workers[worker_id]
+                    if self.workers.get(worker_id) is conn:
+                        del self.workers[worker_id]
                     return
                 self._approved_worker_ids.add(worker_id)
 
@@ -182,8 +187,8 @@ class MasterServer:
         except (asyncio.IncompleteReadError, ConnectionResetError):
             pass
         finally:
-            if worker_id and worker_id in self.workers:
-                self.workers[worker_id].status = WorkerStatus.DISCONNECTED
+            if worker_id and conn is not None and self.workers.get(worker_id) is conn:
+                conn.status = WorkerStatus.DISCONNECTED
                 self.task_manager.release_worker_chunks(worker_id)
                 self._emit("worker_disconnected", {"worker_id": worker_id})
             try:
@@ -244,10 +249,13 @@ class MasterServer:
                                      "chunk_id": msg.payload.get("chunk_id")})
 
         elif t == MessageType.TASK_COMPLETE:
-            chunk_id = msg.payload["chunk_id"]
-            result = msg.payload["result"]
-            if self._validate_result(result):
-                self.task_manager.mark_done(chunk_id, conn.worker_id, result)
+            chunk_id = msg.payload.get("chunk_id")
+            result = msg.payload.get("result")
+            expected = self.task_manager.expected_params(chunk_id, conn.worker_id)
+            if expected is None:
+                return  # ignore a late result after cancellation, timeout, or reassignment
+            if self._validate_result(result, expected) and self.task_manager.mark_done(
+                    chunk_id, conn.worker_id, result):
                 self._emit("chunk_done", {"worker_id": conn.worker_id, "chunk_id": chunk_id})
             else:
                 self.task_manager.mark_failed(chunk_id, conn.worker_id)
@@ -256,10 +264,10 @@ class MasterServer:
 
         elif t == MessageType.TASK_FAILED:
             chunk_id = msg.payload.get("chunk_id")
-            self.task_manager.mark_failed(chunk_id, conn.worker_id)
-            self._emit("chunk_failed", {"worker_id": conn.worker_id, "chunk_id": chunk_id,
-                                         "error": msg.payload.get("error")})
-            await self._maybe_send_next(conn)
+            if self.task_manager.mark_failed(chunk_id, conn.worker_id):
+                self._emit("chunk_failed", {"worker_id": conn.worker_id, "chunk_id": chunk_id,
+                                             "error": msg.payload.get("error")})
+                await self._maybe_send_next(conn)
 
         elif t == MessageType.DISCONNECT:
             self.task_manager.release_worker_chunks(conn.worker_id)
@@ -271,14 +279,25 @@ class MasterServer:
         elif t == MessageType.RESUME:
             conn.status = WorkerStatus.AUTHORIZED
 
-    def _validate_result(self, result: dict) -> bool:
-        """Spot-check the CPU-benchmark digest so a worker can't get credit
-        for a forged or garbage result."""
+    def _validate_result(self, result: dict, expected_params: dict) -> bool:
+        """Validate range, item count, finite metrics, and the deterministic digest."""
         try:
             from tasks.cpu_benchmark_task import sample_digest
-            expected = sample_digest(result["start"], result["end"])
-            return expected == result.get("digest")
-        except Exception:
+            if not isinstance(result, dict):
+                return False
+            start = int(result["start"])
+            end = int(result["end"])
+            count = int(result["count"])
+            total = float(result["sum"])
+            compute_seconds = float(result["compute_seconds"])
+            if start != int(expected_params["start"]) or end != int(expected_params["end"]):
+                return False
+            if end <= start or count != end - start:
+                return False
+            if not math.isfinite(total) or not math.isfinite(compute_seconds) or compute_seconds < 0:
+                return False
+            return sample_digest(start, end) == result.get("digest")
+        except (KeyError, TypeError, ValueError, OverflowError):
             return False
 
     async def _maybe_send_next(self, conn: WorkerConn):
@@ -360,6 +379,7 @@ class MasterServer:
                     conn.status = WorkerStatus.DISCONNECTED
                     self.task_manager.release_worker_chunks(worker_id)
                     self._emit("worker_timed_out", {"worker_id": worker_id})
+                    conn.writer.close()
 
 
 class _DiscoveryProtocol(asyncio.DatagramProtocol):
