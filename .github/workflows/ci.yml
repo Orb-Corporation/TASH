@@ -47,7 +47,7 @@ jobs:
       - name: Assemble Android Worker
         run: gradle --no-daemon -p android-worker :app:assembleDebug
       - name: Upload Android Worker APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: TASH-Android-Worker-debug
           path: android-worker/app/build/outputs/apk/debug/*.apk
